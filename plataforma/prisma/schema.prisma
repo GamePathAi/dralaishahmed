@@ -82,6 +82,8 @@ model Paciente {
   consultas  Consulta[]
   registros  RegistroClinico[]
   receitas   Receita[]
+  atestados  Atestado[]
+  solicitacoesExame SolicitacaoExame[]
 
   @@map("pacientes")
 }
@@ -211,6 +213,8 @@ model Consulta {
   pagamento     Pagamento?
   registros     RegistroClinico[]
   receitas      Receita[]
+  atestados     Atestado[]
+  solicitacoesExame SolicitacaoExame[]
 
   criadoEm    DateTime @default(now())
   atualizadoEm DateTime @updatedAt
@@ -449,6 +453,95 @@ model Receita {
   @@index([pacienteId, criadoEm])
   @@index([consultaId])
   @@map("receitas")
+}
+
+enum TipoAtestado {
+  COMPARECIMENTO // esteve na consulta
+  AFASTAMENTO    // afastar do trabalho/atividade por N dias
+  REPOUSO        // recomendação de repouso por N dias
+}
+
+// Atestado médico. Espelha a Receita (mesmo StatusRegistro, versão/substituiId,
+// origem/assinatura/Fase2 reservada). Conteúdo estruturado + texto livre editável.
+model Atestado {
+  id         String   @id @default(cuid())
+  consultaId String
+  consulta   Consulta @relation(fields: [consultaId], references: [id])
+  pacienteId String
+  paciente   Paciente @relation(fields: [pacienteId], references: [id])
+  medicaId   String
+
+  status StatusRegistro @default(RASCUNHO)
+  versao Int            @default(1)
+  substituiId String?
+
+  tipo            TipoAtestado @default(COMPARECIMENTO)
+  diasAfastamento Int?         // só p/ AFASTAMENTO/REPOUSO
+  // CID opcional: só entra se a MÉDICA digitar. Diagnóstico no atestado exige
+  // consentimento do paciente (CFM). Vazio = atestado sem CID (o padrão).
+  cid             String?
+  dataInicio      DateTime     // data-base (comparecimento / início do afastamento)
+  textoLivre      String       @db.Text
+
+  origemIA          Boolean @default(false)
+  editadaPelaMedica Boolean @default(false)
+
+  assinadaEm  DateTime?
+  assinadaPor String? // CRM de quem assinou
+
+  // Fase 2 (assinatura digital) — reservado, nulo enquanto é impressa à caneta.
+  assinaturaProvedor String? // "IMPRESSA" | "ICP_BRASIL" | ...
+  assinaturaRef      String?
+  documentoUrl       String?
+
+  criadoEm     DateTime @default(now())
+  atualizadoEm DateTime @updatedAt
+
+  @@index([pacienteId, criadoEm])
+  @@index([consultaId])
+  @@map("atestados")
+}
+
+enum CategoriaExame {
+  SANGUE  // laboratorial / sangue
+  IMAGEM  // raio-x, ultrassom, TC, RM...
+  OUTROS
+}
+
+// Solicitação (pedido) de exames. Espelha a Receita/Atestado. Itens em Json
+// (cada um: categoria + nome), + indicação clínica opcional.
+model SolicitacaoExame {
+  id         String   @id @default(cuid())
+  consultaId String
+  consulta   Consulta @relation(fields: [consultaId], references: [id])
+  pacienteId String
+  paciente   Paciente @relation(fields: [pacienteId], references: [id])
+  medicaId   String
+
+  status StatusRegistro @default(RASCUNHO)
+  versao Int            @default(1)
+  substituiId String?
+
+  itens            Json    // ItemExame[]: { categoria, nome }
+  indicacaoClinica String? @db.Text
+
+  origemIA          Boolean @default(false)
+  editadaPelaMedica Boolean @default(false)
+
+  assinadaEm  DateTime?
+  assinadaPor String? // CRM de quem assinou
+
+  // Fase 2 (assinatura digital) — reservado.
+  assinaturaProvedor String?
+  assinaturaRef      String?
+  documentoUrl       String?
+
+  criadoEm     DateTime @default(now())
+  atualizadoEm DateTime @updatedAt
+
+  @@index([pacienteId, criadoEm])
+  @@index([consultaId])
+  @@map("solicitacoes_exame")
 }
 
 // ---------------------------------------------------------------- pagamento

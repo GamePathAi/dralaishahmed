@@ -25,6 +25,8 @@ import {
   type ModoEditor,
   type CamposRegistro,
 } from "@/components/prontuario/EditorRegistro";
+import { BotaoGerarAtestado } from "@/components/atestado/BotaoGerarAtestado";
+import { BotaoSolicitarExames } from "@/components/exames/BotaoSolicitarExames";
 
 export const dynamic = "force-dynamic";
 
@@ -176,6 +178,13 @@ export default async function PaginaRegistro({
           </Link>
         </div>
       )}
+
+      {/* Documentos da consulta — atalhos irmãos do banner de receita. */}
+      <div className="mb-5 flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+        <span className="text-sm text-slate-600">Documentos:</span>
+        <BotaoGerarAtestado consultaId={consultaId} />
+        <BotaoSolicitarExames consultaId={consultaId} />
+      </div>
 
       {/* Alergia sempre visível enquanto se escreve a conduta — é o momento em
           que a omissão custa caro. */}

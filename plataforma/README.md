@@ -391,8 +391,27 @@ REMOVIDO porque o build não fecha no EC2 de 1 GB — deploy passou a ser **buil
 (cache do webpack off) + enviar o `.next`** (`tar --exclude=.next/cache | ssh`). (4)
 **Mojibake** do `notas/route.ts` corrigido. (5) **Fase A dos documentos clínicos** —
 notas manuais da médica na sala (`Consulta.notaSessaoMedica`, autosave), que reaparecem
-como apoio no registro pós-consulta. Fases B (atestado)/C (exames)/D (entrega por
-link na área do paciente) pendentes.
+como apoio no registro pós-consulta. **Fase B — atestado** (`Atestado`, enum `TipoAtestado`,
+migration `atestado`): espelha a receita (rascunho→assinado→retificado, modelos prontos em
+`lib/documentos/modelos-atestado.ts`, editor, via impressa A4 `window.print`, atalho "Gerar
+atestado" na tela de registro). **Fase C — solicitação de exames** (`SolicitacaoExame`,
+enum `CategoriaExame` SANGUE/IMAGEM/OUTROS, migration `solicitacao_exame`, NO AR
+31/08/2026): mesmo padrão — a médica marca exames comuns (`lib/documentos/exames-comuns.ts`,
+17 pré-cadastrados por categoria) e/ou digita os próprios, escreve indicação clínica e
+assina; rascunho→assinado→retificado; via impressa A4 agrupada por categoria; atalho
+"Solicitar exames" na barra Documentos da tela de registro (ao lado de atestado). Rotas
+`/api/exames` (POST cria/reusa rascunho) + `/api/exames/[id]/assinar` (3 caminhos) + páginas
+`/exames/[id]` e `/exames/[id]/imprimir`. Coberto pelo roteiro (5c). **Fase D — entrega por
+link na área do paciente** (NO AR, sem migration): o paciente vê seus documentos assinados
+em `/minhas-consultas` (chips por consulta) e abre `/documentos/[tipo]/[id]` — mesmo layout
+A4 que a médica imprime, agora em componentes compartilhados (`@/components/documentos/{Receita,
+Atestado,Exames}Impress*`, fonte única — as 3 páginas de impressão da médica foram refatoradas
+p/ usá-los). Posse por `paciente.usuarioId === sessao.user.id` (id de outro → `notFound`, nunca
+403); rascunho nunca servido; abertura audita `EXPORTOU_DADOS`. A médica dispara por e-mail:
+botão "Enviar ao paciente" na tela do documento assinado → `POST /api/documentos/[tipo]/[id]/enviar`
+(médica-only, rate-limit, só ASSINADO, audita EXPORTOU_DADOS) → `notificarDocumento` →
+`enviarDocumentoDisponivel` (link `AUTH_URL/documentos/...`, rota com sessão, nunca URL pública).
+Coberto pelo roteiro (5c/D). Documentos clínicos: **Fases A–D completas**.
 
 **Consulta presa em "Em andamento" — convergência (bug corrigido):** a consulta
 entra em `EM_ANDAMENTO` quando a médica abre a sala, e a única saída limpa era

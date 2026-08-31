@@ -20,6 +20,46 @@ export const metadata: Metadata = { title: "Minhas consultas" };
 const MIN_ANTES = 15;
 const MIN_DEPOIS = 30;
 
+/** Documentos assinados de uma consulta, achatados numa lista de links. */
+function docsDaConsulta(c: {
+  receitas: { id: string }[];
+  atestados: { id: string }[];
+  solicitacoesExame: { id: string }[];
+}) {
+  return [
+    ...c.receitas.map((d) => ({ tipo: "receita", id: d.id, rotulo: "Receita" })),
+    ...c.atestados.map((d) => ({ tipo: "atestado", id: d.id, rotulo: "Atestado" })),
+    ...c.solicitacoesExame.map((d) => ({
+      tipo: "exames",
+      id: d.id,
+      rotulo: "Solicitação de exames",
+    })),
+  ];
+}
+
+/** Chips de link para os documentos de uma consulta (ou nada, se não houver). */
+function LinksDocumentos({
+  docs,
+}: {
+  docs: { tipo: string; id: string; rotulo: string }[];
+}) {
+  if (docs.length === 0) return null;
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-2">
+      <span className="text-xs font-medium text-slate-500">Documentos:</span>
+      {docs.map((d) => (
+        <Link
+          key={`${d.tipo}-${d.id}`}
+          href={`/documentos/${d.tipo}/${d.id}`}
+          className="rounded-full border border-teal-200 bg-teal-50 px-3 py-1 text-xs font-medium text-teal-800 hover:border-teal-400"
+        >
+          {d.rotulo}
+        </Link>
+      ))}
+    </div>
+  );
+}
+
 export default async function PaginaMinhasConsultas() {
   const sessao = await auth();
   if (!sessao?.user) redirect("/entrar?destino=/minhas-consultas");
@@ -41,6 +81,11 @@ export default async function PaginaMinhasConsultas() {
           modalidade: true,
           status: true,
           motivo: true,
+          // Só o documento vigente (assinado) — rascunho e versão retificada
+          // não vão para o paciente.
+          receitas: { where: { status: "ASSINADO" }, select: { id: true } },
+          atestados: { where: { status: "ASSINADO" }, select: { id: true } },
+          solicitacoesExame: { where: { status: "ASSINADO" }, select: { id: true } },
         },
       })
     : [];
@@ -131,6 +176,8 @@ export default async function PaginaMinhasConsultas() {
                       Rua Alfredo Justino, 76 — Três Lagoas/MS
                     </p>
                   )}
+
+                  <LinksDocumentos docs={docsDaConsulta(c)} />
                 </li>
               );
             })}
@@ -159,22 +206,25 @@ export default async function PaginaMinhasConsultas() {
           </h2>
           <ul className="mt-3 divide-y divide-slate-200 rounded-xl border border-slate-200 bg-white">
             {passadas.map((c) => (
-              <li key={c.id} className="flex items-center gap-3 px-5 py-3.5">
-                <span className="flex-1 text-sm text-slate-700">
-                  {c.inicioEm.toLocaleDateString("pt-BR", {
-                    day: "2-digit",
-                    month: "long",
-                    year: "numeric",
-                  })}
-                </span>
-                <span className="text-xs text-slate-400">
-                  {c.modalidade === "TELECONSULTA" ? "vídeo" : "presencial"}
-                </span>
-                {c.status === "CANCELADA" && (
-                  <span className="rounded-full bg-red-50 px-2 py-0.5 text-xs text-red-700">
-                    cancelada
+              <li key={c.id} className="px-5 py-3.5">
+                <div className="flex items-center gap-3">
+                  <span className="flex-1 text-sm text-slate-700">
+                    {c.inicioEm.toLocaleDateString("pt-BR", {
+                      day: "2-digit",
+                      month: "long",
+                      year: "numeric",
+                    })}
                   </span>
-                )}
+                  <span className="text-xs text-slate-400">
+                    {c.modalidade === "TELECONSULTA" ? "vídeo" : "presencial"}
+                  </span>
+                  {c.status === "CANCELADA" && (
+                    <span className="rounded-full bg-red-50 px-2 py-0.5 text-xs text-red-700">
+                      cancelada
+                    </span>
+                  )}
+                </div>
+                <LinksDocumentos docs={docsDaConsulta(c)} />
               </li>
             ))}
           </ul>

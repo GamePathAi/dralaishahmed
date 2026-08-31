@@ -951,6 +951,84 @@ async function main() {
     const cVazio = await prisma.consulta.findUniqueOrThrow({ where: { id: cid }, select: { notaSessaoMedica: true } });
     conferir(putVazio.status === 200 && cVazio.notaSessaoMedica === null, "Nota de sessão: texto vazio grava NULL");
 
+    // ---- atestado (Fase B) ----
+    const criarAt = await req("/api/atestado", { method: "POST", json: { consultaId: cid } });
+    const atId = criarAt.corpo?.id as string;
+    conferir(!!atId, "Atestado: cria rascunho", `status ${criarAt.status}`);
+    const impRascunho = await fetch(`${BASE}/atestado/${atId}/imprimir`, {
+      headers: { cookie: cabecalhoCookie() },
+      redirect: "manual",
+    });
+    conferir(
+      impRascunho.status >= 300 && impRascunho.status < 400,
+      "Atestado: rascunho NÃO imprime (redireciona)",
+      `status ${impRascunho.status}`,
+    );
+    const assinarAt = await req(`/api/atestado/${atId}/assinar`, {
+      method: "POST",
+      json: { tipo: "AFASTAMENTO", diasAfastamento: 2, dataInicio: dataManual, textoLivre: "Atesto afastamento por 2 dias." },
+    });
+    conferir(assinarAt.status === 200, "Atestado: rascunho → assinado (200)", `status ${assinarAt.status}`);
+    const atDb = await prisma.atestado.findUniqueOrThrow({ where: { id: atId }, select: { status: true, assinadaPor: true } });
+    conferir(atDb.status === "ASSINADO" && !!atDb.assinadaPor, "Atestado: fica ASSINADO com CRM");
+    const retSemMotivo = await req(`/api/atestado/${atId}/assinar`, {
+      method: "POST",
+      json: { tipo: "AFASTAMENTO", diasAfastamento: 3, dataInicio: dataManual, textoLivre: "x" },
+    });
+    conferir(
+      retSemMotivo.status === 409 && retSemMotivo.corpo?.codigo === "EXIGE_MOTIVO_RETIFICACAO",
+      "Atestado assinado exige motivo p/ retificar (409)",
+    );
+    const retComMotivo = await req(`/api/atestado/${atId}/assinar`, {
+      method: "POST",
+      json: { tipo: "AFASTAMENTO", diasAfastamento: 3, dataInicio: dataManual, textoLivre: "Atesto afastamento por 3 dias.", motivoRetificacao: "corrigir a quantidade de dias" },
+    });
+    const novoAtId = retComMotivo.corpo?.atestadoId as string;
+    conferir(!!novoAtId && novoAtId !== atId, "Atestado: retificação cria nova versão");
+    const origAt = await prisma.atestado.findUniqueOrThrow({ where: { id: atId }, select: { status: true } });
+    conferir(origAt.status === "RETIFICADO", "Atestado: original vira RETIFICADO");
+    await prisma.atestado.deleteMany({ where: { consultaId: cid } }).catch(() => {});
+
+    // ---- solicitação de exames (Fase C) ----
+    const criarEx = await req("/api/exames", { method: "POST", json: { consultaId: cid } });
+    const exId = criarEx.corpo?.id as string;
+    conferir(!!exId, "Exames: cria rascunho", `status ${criarEx.status}`);
+    const impEx = await fetch(`${BASE}/exames/${exId}/imprimir`, { headers: { cookie: cabecalhoCookie() }, redirect: "manual" });
+    conferir(impEx.status >= 300 && impEx.status < 400, "Exames: rascunho NÃO imprime (redireciona)", `status ${impEx.status}`);
+    const assinarEx = await req(`/api/exames/${exId}/assinar`, {
+      method: "POST",
+      json: { itens: [{ categoria: "SANGUE", nome: "Hemograma completo" }, { categoria: "IMAGEM", nome: "Raio-X de tórax" }], indicacaoClinica: "check-up" },
+    });
+    conferir(assinarEx.status === 200, "Exames: rascunho → assinado (200)", `status ${assinarEx.status}`);
+    const exDb = await prisma.solicitacaoExame.findUniqueOrThrow({ where: { id: exId }, select: { status: true, assinadaPor: true } });
+    conferir(exDb.status === "ASSINADO" && !!exDb.assinadaPor, "Exames: fica ASSINADO com CRM");
+    const exVazio = await req(`/api/exames/${exId}/assinar`, { method: "POST", json: { itens: [] } });
+    conferir(exVazio.status === 400, "Exames: lista vazia é recusada (400)");
+    const exSemMotivo = await req(`/api/exames/${exId}/assinar`, {
+      method: "POST",
+      json: { itens: [{ categoria: "SANGUE", nome: "Glicemia de jejum" }] },
+    });
+    conferir(
+      exSemMotivo.status === 409 && exSemMotivo.corpo?.codigo === "EXIGE_MOTIVO_RETIFICACAO",
+      "Exames assinado exige motivo p/ retificar (409)",
+    );
+
+    // ---- entrega por link ao paciente (Fase D) ----
+    const enviarSemAuth = await fetch(`${BASE}/api/documentos/exames/${exId}/enviar`, { method: "POST" });
+    conferir(enviarSemAuth.status === 401, "Documento: enviar sem sessão → 401", `status ${enviarSemAuth.status}`);
+    const enviarTipoInvalido = await req(`/api/documentos/xpto/${exId}/enviar`, { method: "POST" });
+    conferir(enviarTipoInvalido.status === 404, "Documento: tipo inválido → 404", `status ${enviarTipoInvalido.status}`);
+    const enviarInexistente = await req(`/api/documentos/exames/id-que-nao-existe/enviar`, { method: "POST" });
+    conferir(enviarInexistente.status === 404, "Documento: id inexistente → 404", `status ${enviarInexistente.status}`);
+    const enviarDoc = await req(`/api/documentos/exames/${exId}/enviar`, { method: "POST" });
+    conferir(enviarDoc.status === 200 && !!enviarDoc.corpo?.enviadoEm, "Documento: envia ao paciente (200)", `status ${enviarDoc.status}`);
+    const auditoriaExport = await prisma.auditoria.findFirst({
+      where: { acao: "EXPORTOU_DADOS", recursoId: exId, detalhe: { path: ["formato"], equals: "email-link" } },
+    });
+    conferir(!!auditoriaExport, "Documento: envio registra EXPORTOU_DADOS");
+
+    await prisma.solicitacaoExame.deleteMany({ where: { consultaId: cid } }).catch(() => {});
+
     await prisma.consulta.delete({ where: { id: cid } }).catch(() => {});
 
     // ---- encaixe COBRANDO via Pix (só com pagamento ligado) ----

@@ -13,6 +13,7 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import type { ItemReceita } from "@/lib/receita-tipos";
 import { EditorReceita } from "@/components/receita/EditorReceita";
+import { EnviarDocumentoPaciente } from "@/components/documentos/EnviarDocumentoPaciente";
 
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = {
@@ -77,12 +78,15 @@ export default async function PaginaReceita({
             <p className="text-sm text-teal-900">
               Receita assinada. Edite abaixo apenas para <strong>retificar</strong>.
             </p>
-            <Link
-              href={`/receita/${receita.id}/imprimir`}
-              className="rounded-lg bg-teal-800 px-4 py-2 text-sm font-semibold text-white hover:bg-teal-900"
-            >
-              Imprimir / PDF
-            </Link>
+            <div className="flex flex-wrap items-center gap-3">
+              <EnviarDocumentoPaciente tipo="receita" id={receita.id} />
+              <Link
+                href={`/receita/${receita.id}/imprimir`}
+                className="rounded-lg bg-teal-800 px-4 py-2 text-sm font-semibold text-white hover:bg-teal-900"
+              >
+                Imprimir / PDF
+              </Link>
+            </div>
           </div>
         </div>
       )}
