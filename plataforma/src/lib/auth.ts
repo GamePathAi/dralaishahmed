@@ -15,10 +15,17 @@
 import NextAuth from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import Nodemailer from "next-auth/providers/nodemailer";
+import nodemailer from "nodemailer";
 import { prisma } from "@/lib/prisma";
 import { AdapterPrismaClinica } from "@/lib/auth-adapter";
 import { verificarSenha, verificarTotp } from "@/lib/seguranca";
 import { consumir, liberar } from "@/lib/rate-limit";
+import {
+  assinaturaEmail,
+  botaoEmail,
+  layoutEmail,
+  paragrafoEmail,
+} from "@/lib/email-template";
 
 declare module "next-auth" {
   interface User {
@@ -45,6 +52,47 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       server: process.env.EMAIL_SERVER,
       from: process.env.EMAIL_FROM,
       maxAge: 15 * 60, // link vale 15 min
+      // Substitui o template PADRÃO do Auth.js — que sai em INGLÊS ("Sign in
+      // to…") — por um e-mail em português e com a identidade da clínica. Há
+      // paciente que não lê inglês; o botão precisa ser óbvio e na língua dele.
+      async sendVerificationRequest({ identifier, url, provider }) {
+        const conteudo =
+          paragrafoEmail("Olá.") +
+          paragrafoEmail(
+            "Recebemos um pedido para acessar a área de consultas da " +
+              "Dra. Laís com este e-mail. Toque no botão abaixo para entrar:",
+          ) +
+          botaoEmail(url, "Entrar") +
+          paragrafoEmail(
+            '<span style="color:#6b7a72;font-size:13px;">O link vale por 15 minutos e só funciona uma vez.</span>',
+          ) +
+          paragrafoEmail(
+            "Se você não pediu este acesso, ignore este e-mail — nada acontece.",
+          ) +
+          assinaturaEmail();
+
+        const texto = [
+          "Olá.",
+          "Recebemos um pedido para acessar a área de consultas da Dra. Laís com este e-mail.",
+          "Acesse pelo link abaixo (vale 15 minutos, uso único):",
+          url,
+          "Se você não pediu este acesso, ignore este e-mail — nada acontece.",
+          "",
+          "Dra. Laís Caroline Hahmed — CRM-MS 16563",
+        ].join("\n");
+
+        const transporte = nodemailer.createTransport(provider.server);
+        await transporte.sendMail({
+          to: identifier,
+          from: provider.from,
+          subject: "Acesso à sua consulta",
+          text: texto,
+          html: layoutEmail({
+            preheader: "Seu link de acesso — vale 15 minutos.",
+            conteudo,
+          }),
+        });
+      },
     }),
 
     // ---- médica: senha + TOTP -------------------------------------------

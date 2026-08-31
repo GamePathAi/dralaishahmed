@@ -15,6 +15,8 @@ import {
   enviarLembreteConsulta,
   enviarConfirmacaoAgendamento,
   enviarCancelamentoConsulta,
+  enviarDocumentoDisponivel,
+  type TipoDocumento,
 } from "@/lib/email";
 
 type Modalidade = "TELECONSULTA" | "PRESENCIAL";
@@ -50,6 +52,28 @@ export async function notificarLinkConsulta(dados: {
   // entra aqui, com o mesmo padrão de try/catch por canal.
   const whatsapp = whatsAppConfigurado() ? await enviarWhatsAppLink(dados) : null;
 
+  return { email, whatsapp };
+}
+
+/**
+ * Avisa o paciente que a médica disponibilizou um documento (receita/atestado/
+ * exames) da consulta, com o link para vê-lo. Disparado pela médica sob demanda.
+ */
+export async function notificarDocumento(dados: {
+  nome: string;
+  email: string;
+  tipo: TipoDocumento;
+  documentoId: string;
+}): Promise<ResultadoNotificacao> {
+  let email = false;
+  try {
+    await enviarDocumentoDisponivel(dados);
+    email = true;
+  } catch (erro) {
+    console.error("[notificacoes] falha no e-mail de documento", dados.documentoId, erro);
+  }
+  // WhatsApp entra aqui quando a Cloud API estiver configurada.
+  const whatsapp = whatsAppConfigurado() ? await enviarWhatsAppDocumento(dados) : null;
   return { email, whatsapp };
 }
 
@@ -106,5 +130,8 @@ async function enviarWhatsAppConfirmacao(_dados: unknown): Promise<boolean> {
   return false;
 }
 async function enviarWhatsAppCancelamento(_dados: unknown): Promise<boolean> {
+  return false;
+}
+async function enviarWhatsAppDocumento(_dados: unknown): Promise<boolean> {
   return false;
 }
