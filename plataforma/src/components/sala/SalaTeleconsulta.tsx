@@ -10,7 +10,7 @@
  * try/catch e nenhuma delas fecha a sala.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   DailyAudio,
   DailyProvider,
@@ -220,20 +220,6 @@ function Sala({
     }, [entrou]),
   );
 
-  /**
-   * O paciente foi retirado da sala pela médica ao encerrar a consulta.
-   *
-   * Sem isto ele ficava numa tela de vídeo morta, sem entender que acabou.
-   * `left-meeting` cobre os dois casos — saída própria e remoção — e nos dois
-   * a tela de encerramento é a resposta certa.
-   */
-  useDailyEvent(
-    "left-meeting",
-    useCallback(() => {
-      if (papel === "PACIENTE") setEncerrado(true);
-    }, [papel]),
-  );
-
   const streamDe = (track?: MediaStreamTrack | null) =>
     track ? new MediaStream([track]) : null;
 
@@ -243,6 +229,21 @@ function Sala({
     streamLocal: streamDe(audioLocal.persistentTrack),
     streamRemota: streamDe(audioRemoto.persistentTrack),
   });
+
+  // Áudio da consulta, garantido FORA do botão de encerrar.
+  //
+  // O áudio da gravação vive só na memória do navegador e antes só era enviado
+  // quando a médica clicava "Encerrar consulta". Se o PACIENTE saía primeiro
+  // (ou caía a conexão), o `participant-left` descartava tudo e a consulta
+  // terminava sem transcrição — confirmado em produção (toda consulta com
+  // consentimento aceito ficou sem `Transcricao`). Agora, quando o paciente sai
+  // gravando, o áudio é assegurado (finalizado, enviado e a transcrição
+  // iniciada) em segundo plano. Estes refs guardam o resultado para a médica
+  // não capturar/enviar de novo ao encerrar, e a promessa em voo evita corrida
+  // entre a saída do paciente e o clique de encerrar.
+  const audioBlobRef = useRef<Blob | null>(null);
+  const audioKeyRef = useRef<string | null>(null);
+  const asseguracaoRef = useRef<Promise<void> | null>(null);
 
   // A gravação começa quando os dois lados estão na sala e há aceite —
   // não no momento em que a médica entra sozinha.
@@ -264,19 +265,141 @@ function Sala({
       assistenteIniciado &&
       idRemoto &&
       faixaLocalPronta &&
-      gravador.estado === "ocioso"
+      gravador.estado === "ocioso" &&
+      // Já asseguramos/capturamos um trecho (paciente saiu e voltou): não
+      // reinicia a gravação numa reconexão — senão o novo trecho seria gravado
+      // e depois descartado em silêncio, e a transcrição rodaria só no primeiro.
+      !audioKeyRef.current &&
+      !audioBlobRef.current
     ) {
       gravador.iniciar();
     }
   }, [papel, consentimento, assistenteIniciado, idRemoto, faixaLocalPronta, gravador]);
 
-  // Se o paciente cair, descarta o que foi gravado — evita um áudio parcial
-  // virando prontuário de uma consulta que não aconteceu.
+  // Sobe um blob de áudio por URL pré-assinada e devolve a `audioKey`, ou uma
+  // mensagem de erro pronta para a tela. Separa o erro de REDE (fetch lança —
+  // tipicamente CSP bloqueando o bucket) do erro de RESPOSTA do S3 (que traz o
+  // <Code> exato: SignatureDoesNotMatch, AccessDenied, CORS).
+  const enviarAudio = useCallback(
+    async (audio: Blob): Promise<{ audioKey: string } | { erro: string }> => {
+      // Presign: uma falha de rede aqui não pode virar exceção genérica —
+      // devolve `{erro}` como o resto do fluxo.
+      let presign: Response;
+      try {
+        presign = await fetch(`/api/consultas/${consultaId}/audio`, {
+          method: "POST",
+        });
+      } catch (e) {
+        console.error("[sala] falha ao pedir a URL de upload do áudio", e);
+        return { erro: "Não foi possível preparar o envio do áudio. O registro deve ser redigido manualmente." };
+      }
+      if (!presign.ok) {
+        console.error("[sala] presign do áudio falhou", presign.status);
+        return { erro: "Não foi possível preparar o envio do áudio. O registro deve ser redigido manualmente." };
+      }
+      const { url, audioKey } = (await presign.json()) as {
+        url: string;
+        audioKey: string;
+      };
+
+      // O Content-Type precisa ser IDÊNTICO ao que assinou a URL.
+      let envio: Response;
+      try {
+        envio = await fetch(url, {
+          method: "PUT",
+          body: audio,
+          headers: { "Content-Type": TIPO_AUDIO_CONSULTA },
+        });
+      } catch (e) {
+        console.error("[sala] upload bloqueado antes de sair do navegador", e);
+        return {
+          erro:
+            "O navegador bloqueou o envio do áudio para o armazenamento. " +
+            "Provavelmente a política de segurança (CSP) não permite o endereço " +
+            "do bucket. O registro deve ser redigido manualmente.",
+        };
+      }
+
+      if (!envio.ok) {
+        const detalhe = await envio.text().catch(() => "");
+        const codigo = detalhe.match(/<Code>([^<]+)<\/Code>/)?.[1] ?? "";
+        console.error("[sala] upload do áudio falhou", envio.status, detalhe);
+        return {
+          erro:
+            `Não foi possível enviar o áudio (HTTP ${envio.status}${codigo ? ` — ${codigo}` : ""}). ` +
+            "O registro desta consulta deve ser redigido manualmente.",
+        };
+      }
+
+      return { audioKey: audioKey as string };
+    },
+    [consultaId],
+  );
+
+  // Dispara o job de transcrição (uma vez). É o POST que CRIA a linha de
+  // `Transcricao` com `jobNome` — a partir daí o cron consegue retomar e
+  // concluir mesmo que a médica saia sem esperar. `keepalive` para sobreviver à
+  // navegação.
+  const dispararTranscricao = useCallback(
+    async (audioKey: string) => {
+      await fetch(`/api/consultas/${consultaId}/notas`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ audioKey }),
+        keepalive: true,
+      }).catch((e) =>
+        console.warn("[sala] não foi possível iniciar a transcrição", e),
+      );
+    },
+    [consultaId],
+  );
+
+  // Finaliza e ENVIA o áudio já, sem esperar o botão de encerrar — senão o áudio
+  // (só em memória) se perderia quando o paciente sai ou a conexão da médica
+  // cai. Inicia o job de transcrição; o cron conclui o resto.
+  //
+  // A função é DONA de `asseguracaoRef`: guarda a própria promessa em voo e a
+  // devolve em chamadas repetidas, para o `encerrar` esperar o trabalho REAL (e
+  // não uma promessa vazia) e nunca capturar/enviar duas vezes. Em caso de
+  // falha, libera o ref para nova tentativa; o blob fica guardado para o retry.
+  const assegurarAudio = useCallback((): Promise<void> => {
+    if (asseguracaoRef.current) return asseguracaoRef.current;
+    if (audioKeyRef.current) return Promise.resolve();
+
+    const p = (async () => {
+      try {
+        const audio = audioBlobRef.current ?? (await gravador.encerrar());
+        if (!audio) return;
+        audioBlobRef.current = audio;
+        const r = await enviarAudio(audio);
+        if ("audioKey" in r) {
+          audioKeyRef.current = r.audioKey;
+          await dispararTranscricao(r.audioKey);
+        } else {
+          console.warn("[sala] não foi possível assegurar o áudio:", r.erro);
+        }
+      } catch (e) {
+        console.error("[sala] falha ao assegurar o áudio da consulta", e);
+      } finally {
+        // Sucesso deixa a promessa resolvida no ref (o encerrar espera e segue
+        // pelo audioKeyRef). Falha zera para permitir nova tentativa.
+        if (!audioKeyRef.current) asseguracaoRef.current = null;
+      }
+    })();
+
+    asseguracaoRef.current = p;
+    return p;
+  }, [gravador, enviarAudio, dispararTranscricao]);
+
+  // Se o paciente sai da sala com a gravação em andamento, o áudio é ASSEGURADO
+  // (finalizado, enviado e transcrição iniciada) em vez de descartado — a
+  // consulta aconteceu e a médica quer o rascunho. Gravação curta/vazia (ex.:
+  // paciente que entrou e saiu na hora) vira transcrição vazia e não gera
+  // rascunho, então não há risco de "prontuário de consulta que não aconteceu".
   //
   // A contagem vem de `daily.participants()`, e não do `idRemoto` do render:
   // quando este evento dispara, o estado do React ainda não refletiu a saída,
   // então `idRemoto` continua preenchido e a condição nunca era verdadeira.
-  // A proteção existia no código e não funcionava na prática.
   useDailyEvent(
     "participant-left",
     useCallback(() => {
@@ -284,9 +407,45 @@ function Sala({
       const restantes = Object.values(daily?.participants() ?? {}).filter(
         (p) => !p.local,
       );
-      if (restantes.length === 0) gravador.descartar();
-    }, [daily, gravador]),
+      if (restantes.length === 0) void assegurarAudio();
+    }, [daily, gravador, assegurarAudio]),
   );
+
+  // Fim da chamada. Para o paciente, mostra a tela de encerramento (saída
+  // própria ou remoção pela médica). Para a MÉDICA, se a conexão dela cair com
+  // a gravação em andamento, assegura o áudio — a aba segue aberta, então dá
+  // para subir; não encerra a consulta (o encerrar de fato é o botão).
+  useDailyEvent(
+    "left-meeting",
+    useCallback(() => {
+      if (papel === "PACIENTE") {
+        setEncerrado(true);
+        return;
+      }
+      if (gravador.estado === "gravando") void assegurarAudio();
+    }, [papel, gravador, assegurarAudio]),
+  );
+
+  // Rede de segurança contra a perda que sobra: a médica fecha a aba / navega
+  // com a gravação rodando (ou com áudio ainda não confirmado no servidor).
+  // O áudio vive só na memória e não dá para subir um blob de MB no `unload`,
+  // então o máximo honesto é PEDIR CONFIRMAÇÃO antes de sair. Só para a médica.
+  useEffect(() => {
+    if (papel !== "MEDICA") return;
+    const aviso = (e: BeforeUnloadEvent) => {
+      const pendente =
+        gravador.estado === "gravando" ||
+        gravador.estado === "finalizando" ||
+        (!!audioBlobRef.current && !audioKeyRef.current) ||
+        (!!asseguracaoRef.current && !audioKeyRef.current);
+      if (pendente) {
+        e.preventDefault();
+        e.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", aviso);
+    return () => window.removeEventListener("beforeunload", aviso);
+  }, [papel, gravador]);
 
   const alternarMic = () => {
     daily?.setLocalAudio(!micLigado);
@@ -321,7 +480,14 @@ function Sala({
         );
       }
 
-      const audio = await gravador.encerrar();
+      // Se o paciente saiu antes, o áudio já está sendo assegurado em segundo
+      // plano; espera concluir para não capturar nem enviar duas vezes.
+      if (asseguracaoRef.current) await asseguracaoRef.current.catch(() => {});
+
+      const audio = audioBlobRef.current ?? (await gravador.encerrar());
+      // Guarda o blob para o aviso de "não feche" (beforeunload) valer também
+      // durante o upload, e para o retry preservar o áudio.
+      if (audio) audioBlobRef.current = audio;
 
       // Tira o paciente da sala ANTES de sair.
       //
@@ -357,46 +523,17 @@ function Sala({
         return;
       }
 
-      // 1. sobe o áudio por URL pré-assinada (não passa pelo servidor Next)
-      const { url, audioKey } = await fetch(
-        `/api/consultas/${consultaId}/audio`,
-        { method: "POST" },
-      ).then((r) => r.json());
-
-      // O Content-Type precisa ser IDÊNTICO ao que assinou a URL. `audio.type`
-      // vem do MediaRecorder como "audio/webm;codecs=opus" e não bate com a
-      // assinatura — o S3 devolve 403 e a gravação da consulta se perde.
-      // Um bloqueio de CSP faz o fetch LANÇAR, não devolver status ruim — por
-      // isso a falha caía no catch genérico ("falha ao processar o áudio") e
-      // escondia a causa. Aqui o erro de rede é separado do erro de resposta.
-      const envio = await fetch(url, {
-        method: "PUT",
-        body: audio,
-        headers: { "Content-Type": TIPO_AUDIO_CONSULTA },
-      }).catch((e: unknown) => {
-        console.error("[sala] upload bloqueado antes de sair do navegador", e);
-        setAvisoIA(
-          "O navegador bloqueou o envio do áudio para o armazenamento. " +
-            "Provavelmente a política de segurança (CSP) não permite o endereço " +
-            "do bucket. O registro deve ser redigido manualmente.",
-        );
-        return null;
-      });
-
-      if (!envio) return;
-
-      if (!envio.ok) {
-        // O motivo tem que chegar à tela. Escondido no console, cada falha
-        // custava uma rodada de "deu um erro, não sei qual" — e o S3 devolve
-        // XML com a causa exata (SignatureDoesNotMatch, AccessDenied, CORS).
-        const detalhe = await envio.text().catch(() => "");
-        const codigo = detalhe.match(/<Code>([^<]+)<\/Code>/)?.[1] ?? "";
-        console.error("[sala] upload do áudio falhou", envio.status, detalhe);
-        setAvisoIA(
-          `Não foi possível enviar o áudio (HTTP ${envio.status}${codigo ? ` — ${codigo}` : ""}). ` +
-            "O registro desta consulta deve ser redigido manualmente.",
-        );
-        return;
+      // 1. sobe o áudio se ainda não foi (o caminho "paciente saiu antes" já
+      // subiu e guardou a audioKey).
+      let audioKey = audioKeyRef.current;
+      if (!audioKey) {
+        const r = await enviarAudio(audio);
+        if ("erro" in r) {
+          setAvisoIA(r.erro);
+          return;
+        }
+        audioKey = r.audioKey;
+        audioKeyRef.current = audioKey;
       }
 
       // 2. transcreve + estrutura
