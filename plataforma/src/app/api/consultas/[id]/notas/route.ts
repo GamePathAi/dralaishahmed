@@ -46,15 +46,15 @@ export async function POST(
     return NextResponse.json({ erro: "Não autorizado." }, { status: 401 });
   }
 
-  // S� o que esta rota usa: id/medica/status via campos escalares, mais o
-  // consentimento e o job de transcri��o. N�o carrega o usu�rio inteiro
-  // (senhaHash/totpSecret/cpf) � o pipeline busca o que precisa por conta.
+  // Só o que esta rota usa: id/medica/status via campos escalares, mais o
+  // consentimento e o job de transcrição. Não carrega o usuário inteiro
+  // (senhaHash/totpSecret/cpf) - o pipeline busca o que precisa por conta.
   const consulta = await prisma.consulta.findUnique({
     where: { id: consultaId },
     select: {
       medicaId: true,
       consentimento: { select: { aceito: true } },
-      transcricao: { select: { jobNome: true } },
+      transcricao: { select: { jobNome: true, audioKey: true } },
     },
   });
 
@@ -87,14 +87,14 @@ export async function POST(
   // Passo 1 — ainda não há job: inicia
   // ======================================================================
   if (!consulta.transcricao?.jobNome) {
-    // Formato exato da chave, n�o s� o prefixo. `startsWith` sozinho aceitava
-    // `consultas/<id>/../../outra` e sufixos arbitr�rios; aqui a chave tem que
-    // casar o padr�o inteiro que `chaveAudio` gera.
+    // Formato exato da chave, não só o prefixo. `startsWith` sozinho aceitava
+    // `consultas/<id>/../../outra` e sufixos arbitrários; aqui a chave tem que
+    // casar o padrão inteiro que `chaveAudio` gera.
     const chaveOk =
       typeof audioKey === "string" &&
       new RegExp(`^consultas/${consultaId}/audio-\\d+\\.webm$`).test(audioKey);
     if (!chaveOk) {
-      return NextResponse.json({ erro: "Chave de �udio inv�lida." }, { status: 400 });
+      return NextResponse.json({ erro: "Chave de áudio inválida." }, { status: 400 });
     }
 
     try {
@@ -171,11 +171,24 @@ export async function POST(
   }
 
 
+  // Já há job para outra chave: este upload virou órfão (corrida rara de dois
+  // uploads para a mesma consulta). O job usa a chave gravada, não esta — então
+  // remove a órfã agora, senão ela ficaria no bucket como áudio de saúde solto,
+  // sem rastro no banco, dependendo só do ciclo de vida do S3 para sumir.
+  if (
+    typeof audioKey === "string" &&
+    audioKey &&
+    consulta.transcricao?.audioKey &&
+    audioKey !== consulta.transcricao.audioKey
+  ) {
+    await removerAudio(audioKey).catch(() => {});
+  }
+
   // ======================================================================
-  // Passos 2 a 4 � acompanhar o job, transcrever e estruturar
+  // Passos 2 a 4 - acompanhar o job, transcrever e estruturar
   // ======================================================================
-  // Delegado a `concluirNotas`, que o cron tamb�m usa para retomar o que ficou
-  // para tr�s quando a m�dica fecha a aba no meio do processamento.
+  // Delegado a `concluirNotas`, que o cron também usa para retomar o que ficou
+  // para trás quando a médica fecha a aba no meio do processamento.
   const r = await concluirNotas(
     consultaId,
     sessao.user.id,
@@ -188,13 +201,13 @@ export async function POST(
 
   if (r.estado === "sem_job") {
     return NextResponse.json(
-      { erro: "Transcri��o n�o iniciada.", codigo: "SEM_JOB" },
+      { erro: "Transcrição não iniciada.", codigo: "SEM_JOB" },
       { status: 409 },
     );
   }
 
   if (r.estado === "falhou") {
-    // 503 para falha de conta (resolve-se fora do c�digo); 502 para o resto.
+    // 503 para falha de conta (resolve-se fora do código); 502 para o resto.
     const status = r.codigo.startsWith("IA_") ? 503 : 502;
     return NextResponse.json({ erro: r.motivo, codigo: r.codigo }, { status });
   }
@@ -209,5 +222,5 @@ export async function POST(
 }
 
 const AVISO =
-  "Rascunho gerado automaticamente. Revise cada campo antes de assinar � " +
-  "a responsabilidade pelo conte�do do prontu�rio � da m�dica.";
+  "Rascunho gerado automaticamente. Revise cada campo antes de assinar - " +
+  "a responsabilidade pelo conteúdo do prontuário é da médica.";

@@ -100,6 +100,21 @@ export async function iniciarTranscricao(opcoes: {
   return jobNome;
 }
 
+/**
+ * Apaga o JSON do resultado da Transcribe (a consulta inteira em texto claro).
+ * Chamado por quem conclui o pipeline DEPOIS de gravar o texto no banco — o
+ * prontuário é a cópia que fica. Best-effort: o erro é logado, não propagado.
+ */
+export async function removerJsonTranscricao(consultaId: string): Promise<void> {
+  const chave = chaveResultado(consultaId);
+  await removerObjeto(chave).catch((e) =>
+    console.error("[transcricao] JSON órfão no S3 — remover manualmente", {
+      chave,
+      e,
+    }),
+  );
+}
+
 interface ResultadoTranscribe {
   results?: {
     transcripts?: { transcript?: string }[];
@@ -137,14 +152,11 @@ export async function acompanharTranscricao(
     .join(" ")
     .trim();
 
-  // O JSON tem a consulta inteira em texto claro. Cumpriu a função, sai do
-  // bucket agora — o prontuário é a cópia que fica, no banco.
-  await removerObjeto(chave).catch((e) =>
-    console.error("[transcricao] JSON órfão no S3 — remover manualmente", {
-      chave,
-      e,
-    }),
-  );
+  // NÃO apaga o JSON aqui. Quem chama precisa GRAVAR o texto no banco primeiro
+  // e só então apagar (via `removerJsonTranscricao`). Apagar antes de persistir
+  // abria uma janela: se o processo caísse entre ler e gravar, o JSON já teria
+  // sumido e uma retomada relia um objeto inexistente — transcrição perdida de
+  // vez, mesmo com o job COMPLETED na AWS.
 
   const itens = bruto.results?.items ?? [];
   const ultimoFim = [...itens].reverse().find((i) => i.end_time)?.end_time;

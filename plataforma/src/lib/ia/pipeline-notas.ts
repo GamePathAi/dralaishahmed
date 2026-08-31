@@ -19,7 +19,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { removerAudio } from "@/lib/s3";
-import { acompanharTranscricao } from "@/lib/ia/transcricao";
+import { acompanharTranscricao, removerJsonTranscricao } from "@/lib/ia/transcricao";
 import {
   gerarNotasClinicas,
   RecusaDoModeloError,
@@ -49,7 +49,14 @@ export type ResultadoPipeline =
  * o áudio já cumpriu a função e não pode sobreviver a uma falha do Claude.
  */
 async function descartarAudio(consultaId: string, audioKey: string | null) {
-  if (!audioKey) return;
+  if (!audioKey) {
+    // Nada a remover, mas marca "removido" mesmo assim: é o sinal que impede a
+    // retomada de reentrar e reler um JSON que já foi apagado.
+    await prisma.transcricao
+      .update({ where: { consultaId }, data: { audioRemovido: true } })
+      .catch(() => {});
+    return;
+  }
   await removerAudio(audioKey)
     .then(() =>
       prisma.transcricao.update({
@@ -120,7 +127,47 @@ async function criarRascunhoReceita(
   }
 }
 
-export async function concluirNotas(
+/**
+ * Serializa o trabalho por consulta DENTRO deste processo.
+ *
+ * A app roda numa instância única (systemd `dralais-plataforma`), então uma
+ * fila em memória por `consultaId` basta para evitar que o cron e o loop ao
+ * vivo (ou dois pedidos) rodem `concluirNotas` ao mesmo tempo — o que criaria
+ * rascunho/receita/ job de transcrição em duplicidade (cada guarda aqui é
+ * "lê-depois-age", sem lock no banco). Sequencializado, o segundo a rodar cai
+ * na guarda de idempotência (rascunho já existe) e não repete o trabalho.
+ */
+const filasPorConsulta = new Map<string, Promise<unknown>>();
+
+function serializarPorConsulta<T>(
+  consultaId: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const anterior = (filasPorConsulta.get(consultaId) ?? Promise.resolve()).catch(
+    () => {},
+  );
+  const atual = anterior.then(fn);
+  const cauda = atual.catch(() => {});
+  filasPorConsulta.set(consultaId, cauda);
+  void cauda.then(() => {
+    if (filasPorConsulta.get(consultaId) === cauda) {
+      filasPorConsulta.delete(consultaId);
+    }
+  });
+  return atual;
+}
+
+export function concluirNotas(
+  consultaId: string,
+  usuarioId: string,
+  ip?: string,
+): Promise<ResultadoPipeline> {
+  return serializarPorConsulta(consultaId, () =>
+    concluirNotasInterno(consultaId, usuarioId, ip),
+  );
+}
+
+async function concluirNotasInterno(
   consultaId: string,
   /** Quem fica na trilha de auditoria como autor do rascunho. */
   usuarioId: string,
@@ -165,41 +212,55 @@ export async function concluirNotas(
     };
   }
 
-  // ---- estado do job ------------------------------------------------------
-  const resultado = await acompanharTranscricao(
-    consulta.transcricao.jobNome,
-    consultaId,
-  );
+  // ---- texto da transcrição ----------------------------------------------
+  // `audioRemovido` marca que já concluímos a transcrição (gravamos o texto e
+  // limpamos áudio+JSON). Enquanto for false, buscamos o job. Depois, usamos o
+  // texto do banco — sem reler o JSON da AWS, que já não existe. Isso é o que
+  // torna a retomada segura: texto vazio no banco não engana o guard (um `""`
+  // seria indistinguível de "ainda não transcrito").
+  let texto = consulta.transcricao.texto;
 
-  if (resultado.estado === "processando") return { estado: "transcrevendo" };
-
-  // A partir daqui o áudio não é mais necessário, aconteça o que acontecer.
-  await descartarAudio(consultaId, consulta.transcricao.audioKey);
-
-  if (resultado.estado === "falhou") {
-    console.error("[pipeline] transcrição falhou", {
+  if (!consulta.transcricao.audioRemovido) {
+    const resultado = await acompanharTranscricao(
+      consulta.transcricao.jobNome,
       consultaId,
-      motivo: resultado.motivo,
+    );
+
+    if (resultado.estado === "processando") return { estado: "transcrevendo" };
+
+    if (resultado.estado === "falhou") {
+      // Job falhou — não há JSON a apagar; o áudio já cumpriu a função.
+      await descartarAudio(consultaId, consulta.transcricao.audioKey);
+      console.error("[pipeline] transcrição falhou", {
+        consultaId,
+        motivo: resultado.motivo,
+      });
+      return {
+        estado: "falhou",
+        codigo: "FALHA_TRANSCRICAO",
+        motivo:
+          "A transcrição do áudio falhou. A consulta foi encerrada normalmente — " +
+          "redija o registro manualmente.",
+      };
+    }
+
+    // GRAVA o texto ANTES de apagar áudio e JSON — o banco é a cópia que fica.
+    await prisma.transcricao.update({
+      where: { consultaId },
+      data: {
+        texto: resultado.texto,
+        duracaoSeg: resultado.duracaoSeg,
+        modelo: resultado.modelo,
+      },
     });
-    return {
-      estado: "falhou",
-      codigo: "FALHA_TRANSCRICAO",
-      motivo:
-        "A transcrição do áudio falhou. A consulta foi encerrada normalmente — " +
-        "redija o registro manualmente.",
-    };
+    texto = resultado.texto;
+
+    // Só agora o áudio e o JSON (a consulta em texto claro) saem do bucket.
+    await descartarAudio(consultaId, consulta.transcricao.audioKey);
+    await removerJsonTranscricao(consultaId);
   }
 
-  await prisma.transcricao.update({
-    where: { consultaId },
-    data: {
-      texto: resultado.texto,
-      duracaoSeg: resultado.duracaoSeg,
-      modelo: resultado.modelo,
-    },
-  });
-
-  if (!resultado.texto.trim()) {
+  if (!texto.trim()) {
     return {
       estado: "falhou",
       codigo: "TRANSCRICAO_VAZIA",
@@ -220,7 +281,7 @@ export async function concluirNotas(
 
     const { relatorio, prescricao, modelo, tokensEntrada, tokensSaida } =
       await gerarNotasClinicas(
-        resultado.texto,
+        texto,
         {
           nome: consulta.paciente.usuario.nome,
           idade,
@@ -298,16 +359,21 @@ export async function concluirNotas(
 /**
  * Varre as transcrições abandonadas.
  *
- * "Abandonada" = job iniciado, texto ainda vazio. É o rastro de uma médica que
- * fechou a aba antes de o processamento terminar. A janela de 24h evita ficar
- * tentando eternamente um job que a AWS já descartou.
+ * "Abandonada" = job iniciado e a consulta ainda SEM rascunho de IA. Cobre dois
+ * casos: (a) a médica fechou a aba antes de o job terminar (texto vazio); e (b)
+ * o texto já foi gravado mas o rascunho não chegou a ser criado (queda entre
+ * gravar o texto e gerar a nota). A janela de 24h evita insistir eternamente
+ * num job que a AWS já descartou. `concluirNotas` é idempotente, então re-pegar
+ * um que já terminou é inócuo.
  */
 export async function retomarTranscricoesPendentes(limite = 20) {
   const pendentes = await prisma.transcricao.findMany({
     where: {
       jobNome: { not: null },
-      texto: "",
       criadoEm: { gte: new Date(Date.now() - 24 * 3600_000) },
+      consulta: {
+        registros: { none: { origemIA: true, status: "RASCUNHO" } },
+      },
     },
     select: { consultaId: true, consulta: { select: { medicaId: true } } },
     take: limite,
