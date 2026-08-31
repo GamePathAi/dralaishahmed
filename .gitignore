@@ -1,0 +1,36 @@
+# === dependências / build ===
+**/node_modules/
+**/.next/
+**/dist/
+**/build/
+**/out/
+*.tsbuildinfo
+
+# === segredos e ambiente (mantém só o template) ===
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# === dado de paciente / mídia de consulta (nunca versionar) ===
+*.webm
+*.wav
+*.m4a
+*.mp3
+*.ogg
+
+# === banco local do prisma ===
+**/prisma/*.db
+**/prisma/*.db-journal
+
+# === tooling de IA local (não é código do projeto) ===
+.claude/
+.qodo/
+
+# === logs e lixo de SO / editor ===
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

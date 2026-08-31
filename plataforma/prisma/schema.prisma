@@ -1,0 +1,563 @@
+// Modelo de dados da plataforma clínica.
+//
+// Três invariantes que o schema protege, e que a aplicação não deve contornar:
+//   1. Nenhuma gravação existe sem um Consentimento correspondente.
+//   2. RegistroClinico ASSINADO é imutável — correções viram nova versão.
+//   3. Nada de prontuário é deletado (guarda de 20 anos, Res. CFM 1.821/2007).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------- pessoas
+
+enum Papel {
+  PACIENTE
+  MEDICA
+}
+
+model Usuario {
+  id        String   @id @default(cuid())
+  papel     Papel    @default(PACIENTE)
+  nome      String
+  email     String   @unique
+  telefone  String?
+  cpf       String?  @unique
+  nascimento DateTime?
+  criadoEm  DateTime @default(now())
+
+  // Credenciais — só a médica usa. Paciente entra por magic link, e por isso
+  // estes campos ficam nulos para ele: não há senha de paciente para vazar.
+  senhaHash  String?
+  totpSecret String?
+
+  // Quando o paciente confirmou o e-mail clicando no link de acesso. O Auth.js
+  // exige este campo (`emailVerified`); aqui ele também serve de prova de que
+  // o endereço no prontuário pertence mesmo a quem o informou.
+  emailVerificadoEm DateTime?
+
+  // Preferências da médica que mexem no CUSTO por consulta. Só a médica usa.
+  //   modeloNota: OPUS (melhor) | SONNET (equilíbrio) | HAIKU (mais barato)
+  //   modoAssistente: SEMPRE (pergunta ao paciente automaticamente) |
+  //                   MANUAL (só grava/transcreve quando a médica ativa) |
+  //                   DESLIGADO (nunca oferece — consulta é só vídeo)
+  // O maior lever de custo é `modoAssistente`: a transcrição (AWS) cobra por
+  // minuto e é o item mais caro; em MANUAL/DESLIGADO ela só roda quando a
+  // médica quer, e as demais consultas não geram esse custo.
+  modeloNota     String @default("OPUS")
+  modoAssistente String @default("SEMPRE")
+
+  // Preço da consulta por modalidade, em CENTAVOS (evita float em dinheiro).
+  // Nasce com um placeholder — a médica ajusta em /configuracoes. É a fonte do
+  // valor cobrado no Pix ao agendar.
+  valorTeleconsultaCent Int @default(30000)
+  valorPresencialCent   Int @default(30000)
+
+  paciente        Paciente?
+  consultasMedica Consulta[] @relation("ConsultasDaMedica")
+  auditorias      Auditoria[]
+  disponibilidades Disponibilidade[]
+  disponibilidadesData DisponibilidadeData[]
+  bloqueios        Bloqueio[]
+  despesas         Despesa[] @relation("DespesasDaMedica")
+
+  @@map("usuarios")
+}
+
+model Paciente {
+  id        String  @id @default(cuid())
+  usuarioId String  @unique
+  usuario   Usuario @relation(fields: [usuarioId], references: [id])
+
+  // Anamnese persistente — alimenta o contexto do assistente de IA.
+  alergias        String?
+  medicacoesUso   String?
+  antecedentes    String?
+
+  consultas  Consulta[]
+  registros  RegistroClinico[]
+  receitas   Receita[]
+
+  @@map("pacientes")
+}
+
+// -------------------------------------------------------------- consultas
+
+enum Modalidade {
+  TELECONSULTA
+  PRESENCIAL
+}
+
+enum StatusConsulta {
+  // Criada, mas ainda não paga: segura o horário (a query de ocupação da agenda
+  // conta este estado como ocupado) por uma janela curta. Se o pagamento não
+  // chega, o cron REMOVE a consulta e o slot volta à grade — ver nota em
+  // `api/cron/lembretes`.
+  AGUARDANDO_PAGAMENTO
+  AGENDADA
+  CONFIRMADA
+  EM_ANDAMENTO
+  CONCLUIDA
+  CANCELADA
+  FALTOU
+}
+
+// ------------------------------------------------------------- pagamento
+
+// Ciclo do pagamento, separado do status da consulta. ISENTO existe para o
+// caminho em que a médica marca uma consulta como sem cobrança (retorno,
+// cortesia); os demais são o fluxo normal do provedor.
+enum StatusPagamento {
+  ISENTO
+  PENDENTE
+  PAGO
+  EXPIRADO
+  FALHOU
+  REEMBOLSADO
+}
+
+// O enum nasce completo, mas só PIX é implementado agora. Cartão e boleto
+// entram plugando o mesmo `ProvedorPagamento` sem tocar no schema.
+enum MetodoPagamento {
+  PIX
+  CARTAO
+  BOLETO
+  DINHEIRO // recebido por fora (encaixe manual pago em espécie/transferência)
+}
+
+// Categorias de DESPESA para o DRE gerencial. Genéricas de propósito: o objetivo
+// é o retrato do negócio pra médica, não a classificação contábil oficial (essa é
+// do contador).
+enum CategoriaDespesa {
+  FERRAMENTAS // Daily, AWS, IA, hospedagem
+  CONTADOR
+  IMPOSTOS
+  MARKETING
+  ALUGUEL
+  OUTROS
+}
+
+// Despesa lançada à mão pela médica. É a metade que falta pro DRE: a receita já
+// vem do Pagamento, a despesa é registrada aqui. `recorrente` = repete todo mês a
+// partir de `data` (ex.: assinatura mensal de ferramenta), até ser removida.
+model Despesa {
+  id        String           @id @default(cuid())
+  medicaId  String
+  medica    Usuario          @relation("DespesasDaMedica", fields: [medicaId], references: [id])
+  descricao String
+  categoria CategoriaDespesa  @default(OUTROS)
+  valorCent Int
+  data      DateTime // mês de competência (caixa) da despesa
+  recorrente Boolean         @default(false)
+
+  criadoEm     DateTime @default(now())
+  atualizadoEm DateTime @updatedAt
+
+  @@index([medicaId, data])
+  @@map("despesas")
+}
+
+model Consulta {
+  id          String         @id @default(cuid())
+  pacienteId  String
+  paciente    Paciente       @relation(fields: [pacienteId], references: [id])
+  medicaId    String
+  medica      Usuario        @relation("ConsultasDaMedica", fields: [medicaId], references: [id])
+
+  modalidade  Modalidade     @default(TELECONSULTA)
+  status      StatusConsulta @default(AGENDADA)
+  // Espelha o ciclo de Pagamento para consulta rápida na agenda/prontuário sem
+  // JOIN. A verdade do dinheiro vive em `pagamento`; este campo é a projeção.
+  statusPagamento StatusPagamento @default(PENDENTE)
+  // Nota livre de pagamento para o ENCAIXE MANUAL da médica: quando ela agenda
+  // um paciente direto e o pagamento foi resolvido por fora (dinheiro, Pix,
+  // cortesia), anota aqui como foi. Vazio no fluxo público (que cobra na plataforma).
+  pagamentoNota String?
+  inicioEm    DateTime
+  duracaoMin  Int            @default(30)
+  motivo      String?        // queixa informada no agendamento
+
+  // Anotação livre da médica DURANTE a consulta (autosave na sala), para quem
+  // prefere digitar em vez de usar o assistente de IA. É fonte de APOIO ao
+  // registro pós-consulta — nunca substitui a transcrição.
+  notaSessaoMedica String? @db.Text
+
+  // Sala de vídeo (Daily) — efêmera, criada sob demanda.
+  salaNome    String?
+  salaUrl     String?
+  salaExpiraEm DateTime?
+
+  iniciadaEm   DateTime?
+  encerradaEm  DateTime?
+
+  // Quando a confirmação de agendamento saiu de fato. NULO depois do
+  // agendamento significa que o envio falhou — e é o que a agenda destaca para
+  // a médica ligar. Sem este campo, uma falha de SMTP some no log e o paciente
+  // fica esperando um e-mail que ninguém sabe que não foi.
+  confirmacaoEnviadaEm DateTime?
+
+  // Marca do lembrete já enviado. É o que impede o cron de mandar o mesmo
+  // e-mail a cada execução — e, como a checagem é por linha e não por horário
+  // de execução, uma rodada perdida do cron se recupera sozinha na seguinte.
+  lembreteEnviadoEm DateTime?
+
+  consentimento Consentimento?
+  transcricao   Transcricao?
+  pagamento     Pagamento?
+  registros     RegistroClinico[]
+  receitas      Receita[]
+
+  criadoEm    DateTime @default(now())
+  atualizadoEm DateTime @updatedAt
+
+  // Trava de agendamento duplo no BANCO, não só na aplicação.
+  // Dois pacientes clicando "confirmar" no mesmo segundo passam pela mesma
+  // checagem de disponibilidade; sem esta constraint, os dois entram. Com ela,
+  // o segundo recebe erro de unicidade e a aplicação devolve "horário ocupado".
+  @@unique([medicaId, inicioEm], name: "horario_unico_da_medica")
+  @@index([medicaId, inicioEm])
+  @@index([pacienteId, inicioEm])
+  // Varredura do cron de lembretes: "próximas, ainda sem lembrete".
+  @@index([lembreteEnviadoEm, inicioEm])
+  @@map("consultas")
+}
+
+// ------------------------------------------------------------------ agenda
+
+// Janela de atendimento recorrente. Ex.: terça, 14:00–18:00, teleconsulta.
+model Disponibilidade {
+  id       String  @id @default(cuid())
+  medicaId String
+  medica   Usuario @relation(fields: [medicaId], references: [id])
+
+  // 0 = domingo … 6 = sábado (mesma convenção de Date.getDay()).
+  diaSemana  Int
+  // Minutos desde a meia-noite, no fuso da médica. Guardar minuto em vez de
+  // DateTime evita a armadilha de "14:00 de qual dia?" numa regra recorrente.
+  inicioMin  Int
+  fimMin     Int
+
+  modalidade Modalidade @default(TELECONSULTA)
+  // Duração do encaixe: define a grade de horários gerada nesta janela.
+  duracaoMin Int        @default(30)
+  // Intervalo entre consultas, para a médica respirar e fechar o registro.
+  intervaloMin Int      @default(10)
+
+  ativo    Boolean  @default(true)
+  criadoEm DateTime @default(now())
+
+  @@index([medicaId, diaSemana])
+  @@map("disponibilidades")
+}
+
+// Disponibilidade de UMA data específica — o "horário especial" do dashboard.
+// Um sábado extra, um plantão, um dia com horário diferente do padrão. Quando
+// existe para uma data, SUBSTITUI a janela recorrente daquele dia (ver
+// `lib/agenda.ts`). É o oposto do Bloqueio: aquele TIRA, este PÕE.
+model DisponibilidadeData {
+  id       String  @id @default(cuid())
+  medicaId String
+  medica   Usuario @relation(fields: [medicaId], references: [id])
+
+  // O dia, guardado como o instante do MEIO-DIA no fuso da médica. Meio-dia (e
+  // não meia-noite) para a chave de data nunca escorregar para o dia vizinho
+  // numa conversão de fuso. A médica não adota horário de verão, então é estável.
+  data DateTime
+
+  // Mesma forma da Disponibilidade recorrente: minutos desde a meia-noite.
+  inicioMin  Int
+  fimMin     Int
+  modalidade Modalidade @default(TELECONSULTA)
+  duracaoMin Int        @default(30)
+  intervaloMin Int      @default(10)
+
+  criadoEm DateTime @default(now())
+
+  @@index([medicaId, data])
+  @@map("disponibilidades_data")
+}
+
+// Exceção pontual: férias, congresso, plantão, feriado.
+// Sempre vence a disponibilidade recorrente.
+model Bloqueio {
+  id       String  @id @default(cuid())
+  medicaId String
+  medica   Usuario @relation(fields: [medicaId], references: [id])
+
+  inicioEm DateTime
+  fimEm    DateTime
+  motivo   String?
+
+  criadoEm DateTime @default(now())
+
+  @@index([medicaId, inicioEm])
+  @@map("bloqueios")
+}
+
+// ---------------------------------------------------- consentimento (LGPD)
+
+// Registro auditável do aceite do paciente para gravação e processamento por IA.
+// Sem uma linha aqui com aceito=true, o hook de gravação não inicia.
+model Consentimento {
+  id         String   @id @default(cuid())
+  consultaId String   @unique
+  consulta   Consulta @relation(fields: [consultaId], references: [id])
+
+  aceito     Boolean
+  // Texto exato mostrado ao paciente no momento do aceite. Guardado na íntegra
+  // porque o texto pode mudar — a prova é o que ele viu, não o texto atual.
+  textoApresentado String
+  versaoTexto      String
+
+  registradoEm DateTime @default(now())
+  ip           String?
+  userAgent    String?
+
+  @@map("consentimentos")
+}
+
+// ------------------------------------------------------------ transcrição
+
+model Transcricao {
+  id         String   @id @default(cuid())
+  consultaId String   @unique
+  consulta   Consulta @relation(fields: [consultaId], references: [id])
+
+  // Job da Amazon Transcribe. A transcrição é assíncrona: a linha nasce com
+  // `texto` vazio quando o job começa e é preenchida quando ele termina. É
+  // isto que permite o cliente acompanhar sem segurar a requisição aberta —
+  // uma consulta de 30 min levaria minutos, e o nginx corta em 60s.
+  jobNome    String?  @unique
+
+  // Chave do áudio no S3, guardada porque quem apaga nem sempre é quem subiu.
+  // Ela vinha só do navegador da médica: se ela fechasse a aba no meio, o
+  // áudio da consulta ficava no bucket sem ninguém saber o nome dele.
+  audioKey   String?
+
+  texto        String   @db.Text
+  idioma       String   @default("pt")
+  duracaoSeg   Int?
+  modelo       String   // ex.: "whisper-1"
+
+  // Confirmação de que o áudio já saiu do storage. Deve ser sempre true em
+  // repouso — se estiver false, há áudio órfão no S3 para limpar.
+  audioRemovido Boolean @default(false)
+
+  criadoEm   DateTime @default(now())
+
+  @@map("transcricoes")
+}
+
+// -------------------------------------------------------- registro clínico
+
+enum StatusRegistro {
+  RASCUNHO   // gerado pela IA, aguardando revisão
+  ASSINADO   // revisado e assinado pela médica — imutável
+  RETIFICADO // substituído por versão posterior (mantido para auditoria)
+}
+
+model RegistroClinico {
+  id         String   @id @default(cuid())
+  consultaId String
+  consulta   Consulta @relation(fields: [consultaId], references: [id])
+  pacienteId String
+  paciente   Paciente @relation(fields: [pacienteId], references: [id])
+
+  status  StatusRegistro @default(RASCUNHO)
+  versao  Int            @default(1)
+  // Aponta para o registro que esta versão substitui.
+  substituiId String?
+
+  // Campos do relatório, na ordem do prontuário.
+  queixaPrincipal      String  @db.Text
+  historiaMoleastiaAtual String @db.Text
+  antecedentes         String  @db.Text
+  hipotesesDiagnosticas String @db.Text
+  conduta              String  @db.Text
+  observacoes          String? @db.Text
+
+  // Rastreabilidade da IA. Nunca apagar: o prontuário precisa registrar que
+  // parte do texto teve origem em geração automática, mesmo após edição.
+  origemIA      Boolean @default(false)
+  modeloIA      String?
+  rascunhoIA    Json?   // saída bruta do modelo, antes da edição da médica
+  editadoPelaMedica Boolean @default(false)
+
+  assinadoEm  DateTime?
+  assinadoPor String?   // CRM de quem assinou
+
+  criadoEm     DateTime @default(now())
+  atualizadoEm DateTime @updatedAt
+
+  @@index([pacienteId, criadoEm])
+  @@map("registros_clinicos")
+}
+
+// ----------------------------------------------------------------- receita
+
+// Receita médica gerada a partir da consulta. Documento clínico-legal separado
+// do prontuário: tem seu próprio ciclo de rascunho→assinatura e sua própria via
+// impressa. Reaproveita o `StatusRegistro` (RASCUNHO/ASSINADO/RETIFICADO) porque
+// a semântica é a mesma — rascunho da IA, versão assinada imutável, retificação
+// mantém a anterior para auditoria.
+model Receita {
+  id         String   @id @default(cuid())
+  consultaId String
+  consulta   Consulta @relation(fields: [consultaId], references: [id])
+  pacienteId String
+  paciente   Paciente @relation(fields: [pacienteId], references: [id])
+  // Sem relação com Usuario de propósito (espelha RegistroClinico): a médica é a
+  // única profissional e a autoria assinada vive em `assinadaPor` (CRM).
+  medicaId   String
+
+  status StatusRegistro @default(RASCUNHO)
+  versao Int            @default(1)
+  substituiId String?
+
+  // Itens da prescrição: ItemPrescricao[] (medicamento, concentração, via,
+  // posologia, quantidade, duração, controlado, observação). Json em vez de
+  // tabela-filha porque a receita é lida/escrita sempre inteira e o formato
+  // estruturado é o que o Memed/ICP-Brasil vão consumir depois sem reparsear.
+  itens             Json
+  orientacoesGerais String?  @db.Text
+  // Atalho para a agenda/prontuário destacarem receita com controlado, que exige
+  // receituário especial. Derivado dos itens no momento de gravar.
+  temControlado     Boolean  @default(false)
+
+  origemIA          Boolean @default(false)
+  modeloIA          String?
+  rascunhoIA        Json?   // saída bruta da IA, antes da edição da médica
+  editadaPelaMedica Boolean @default(false)
+
+  assinadaEm  DateTime?
+  assinadaPor String?   // CRM de quem assinou
+
+  // Fase 2 (assinatura digital / dispensação). Nulos enquanto a receita é só
+  // impressa e assinada à caneta; preenchidos quando entrar ICP-Brasil/Memed.
+  assinaturaProvedor String? // "IMPRESSA" | "ICP_BRASIL" | "MEMED" | ...
+  assinaturaRef      String? // id externo do documento assinado
+  documentoUrl       String? // PDF assinado, quando houver
+
+  criadoEm     DateTime @default(now())
+  atualizadoEm DateTime @updatedAt
+
+  @@index([pacienteId, criadoEm])
+  @@index([consultaId])
+  @@map("receitas")
+}
+
+// ---------------------------------------------------------------- pagamento
+
+// Pagamento de UMA consulta (1:1). O provedor real fica atrás da interface
+// `ProvedorPagamento` (src/lib/pagamento); aqui só guardamos o que é do domínio
+// e o mínimo do provedor para reconciliar e ser idempotente.
+//
+// NUNCA guardar dado de cartão (PAN, CVV, validade) — não há coluna para isso
+// de propósito. Fluxo com cartão, quando existir, tokeniza no provedor e só o
+// `provedorRef` volta para cá. PCI-DSS fica inteiramente do lado do provedor.
+model Pagamento {
+  id         String   @id @default(cuid())
+  consultaId String   @unique
+  consulta   Consulta @relation(fields: [consultaId], references: [id])
+
+  valorCent Int
+  metodo    MetodoPagamento @default(PIX)
+  provedor  String          // ex.: "FAKE", "ASAAS", "MERCADO_PAGO"
+
+  // Id da cobrança NO provedor. Único porque é a chave de idempotência do
+  // webhook: o mesmo evento chega repetido, e é por ele que reconhecemos "já
+  // processei este pagamento". Nulo só na janela entre criar a linha e o
+  // provedor devolver a cobrança.
+  provedorRef String? @unique
+
+  status StatusPagamento @default(PENDENTE)
+
+  // Pix copia-e-cola (BR Code). Guardado para reexibir sem recriar a cobrança.
+  // O QR é derivável disto no cliente, então não ocupa coluna.
+  pixCopiaCola String? @db.Text
+
+  // Fim da janela de reserva. Depois disto, consulta não paga é removida pelo
+  // cron e o horário volta à grade.
+  expiraEm DateTime?
+  pagoEm   DateTime?
+
+  // Payload cru do webhook do provedor, para auditoria e reconciliação manual.
+  bruto Json?
+
+  criadoEm     DateTime @default(now())
+  atualizadoEm DateTime @updatedAt
+
+  @@map("pagamentos")
+}
+
+// ------------------------------------------------------- token de acesso
+
+// Token de uso único do magic link do paciente.
+//
+// Os nomes dos campos são os do Auth.js (`identifier`, `token`, `expires`) e
+// não os do resto do schema, de propósito: este modelo é fronteira com a
+// biblioteca, não domínio clínico. O adapter em `lib/auth-adapter.ts` é quem
+// traduz — ver a nota lá sobre por que não usamos o `PrismaAdapter` oficial.
+model TokenVerificacao {
+  identifier String   // e-mail que pediu o link
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("tokens_verificacao")
+}
+
+// ---------------------------------------------------------------- auditoria
+
+enum AcaoAuditoria {
+  VISUALIZOU_PRONTUARIO
+  CRIOU_RASCUNHO_IA
+  EDITOU_RASCUNHO
+  ASSINOU_REGISTRO
+  RETIFICOU_REGISTRO
+  // Aceite ou recusa do paciente. NÃO confunda com gravação: consentir é
+  // permitir, não é gravar. A rota de consentimento registrava
+  // `INICIOU_GRAVACAO`, o que fazia a trilha afirmar que houve áudio em
+  // consultas onde o gravador nunca chegou a iniciar.
+  REGISTROU_CONSENTIMENTO
+  // Mantido: linhas antigas usam este valor com o sentido errado, e reescrever
+  // trilha de auditoria é pior do que conviver com um valor legado.
+  INICIOU_GRAVACAO
+  ENTROU_NA_SALA
+  // Médica encerrou a consulta pela sala. Valor próprio (não reusa ENTROU_NA_SALA)
+  // para a trilha não afirmar "entrou" quando o evento foi a saída — a mesma
+  // lição do INICIOU_GRAVACAO reusado com sentido errado acima.
+  ENCERROU_CONSULTA
+  CANCELOU_POR_BLOQUEIO
+  EXPORTOU_DADOS
+  // Quem pode trocar o segundo fator pode, na prática, transferir o acesso a
+  // todos os prontuários para outro aparelho. Fica na trilha.
+  VISUALIZOU_SEGUNDO_FATOR
+  TROCOU_SEGUNDO_FATOR
+  // Confirmação de pagamento (via webhook) e reembolso. Dinheiro entra e sai na
+  // trilha como tudo o mais.
+  REGISTROU_PAGAMENTO
+  REEMBOLSOU_PAGAMENTO
+}
+
+// Toda leitura e escrita de prontuário passa por aqui. Exigência prática de
+// sigilo: sem trilha, não há como responder "quem viu este prontuário".
+model Auditoria {
+  id        String        @id @default(cuid())
+  usuarioId String
+  usuario   Usuario       @relation(fields: [usuarioId], references: [id])
+  acao      AcaoAuditoria
+  recursoId String        // id da consulta / registro / paciente
+  detalhe   Json?
+  ip        String?
+  criadoEm  DateTime      @default(now())
+
+  @@index([recursoId, criadoEm])
+  @@index([usuarioId, criadoEm])
+  @@map("auditorias")
+}

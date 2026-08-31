@@ -1,0 +1,2 @@
+-- AlterEnum
+ALTER TYPE "AcaoAuditoria" ADD VALUE 'ENCERROU_CONSULTA';

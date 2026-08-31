@@ -1,0 +1,72 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+   Identidade herdada do site institucional: mesma família de verde-petróleo,
+   mesma serifa nos títulos. A plataforma e o site precisam parecer a mesma
+   clínica — paciente que sai de um e entra no outro não deve estranhar.
+
+   Fontes do sistema, sem carga externa: no site foi decisão de LGPD (nenhuma
+   requisição a terceiro); aqui é decisão de desempenho, porque a sala de vídeo
+   não pode competir por banda com download de fonte.
+--------------------------------------------------------------------------- */
+
+@theme {
+  --font-serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia,
+    "Times New Roman", serif;
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
+
+  /* Verde-petróleo da marca, mapeado sobre a escala teal do Tailwind para que
+     as classes utilitárias (bg-teal-800, text-teal-900…) já saiam certas. */
+  --color-teal-50: #e6f0ed;
+  --color-teal-600: #12604f;
+  --color-teal-700: #0f5148;
+  --color-teal-800: #0c433c;
+  --color-teal-900: #08322d;
+  --color-teal-950: #06201c;
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background: #faf8f5;
+    color: #16211f;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-serif);
+    font-weight: 500;
+    letter-spacing: -0.015em;
+  }
+
+  /* Foco sempre visível. Numa aplicação clínica há uso por teclado em
+     consultório, com as mãos ocupadas — esconder o anel de foco quebra isso. */
+  :focus-visible {
+    outline: 2px solid var(--color-teal-700);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  /* O <video> da sala não deve herdar nada que altere proporção. */
+  video {
+    display: block;
+    max-width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

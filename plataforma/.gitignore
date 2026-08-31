@@ -1,0 +1,47 @@
+# dependencias
+/node_modules
+/.pnp
+.pnp.*
+
+# next
+/.next/
+/out/
+next-env.d.ts
+
+# producao
+/build
+
+# AMBIENTE — nunca versionar. Contem chave da Anthropic, da OpenAI, da Daily,
+# credencial AWS e string de conexao do banco de prontuario.
+.env
+.env.*
+!.env.example
+
+# prisma
+/prisma/*.db
+/prisma/*.db-journal
+
+# sistema
+.DS_Store
+*.pem
+Thumbs.db
+
+# logs
+npm-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# editor
+.vscode/*
+!.vscode/extensions.json
+.idea
+
+# typescript
+*.tsbuildinfo
+
+# AUDIO DE CONSULTA — se algum arquivo de teste cair aqui por engano, nao vai
+# junto para o repositorio.
+*.webm
+*.wav
+*.m4a
+/audio-teste/

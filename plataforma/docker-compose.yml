@@ -1,0 +1,57 @@
+# Postgres de DESENVOLVIMENTO apenas.
+#
+# Não use isto para atender paciente: sem TLS, senha trivial e o volume vive na
+# máquina de quem desenvolve. Produção pede Postgres gerenciado (RDS, Neon) com
+# `sslmode=require`, backup automático e retenção de 20 anos — Res. CFM 1.821/2007
+# e Lei 13.787/2018.
+#
+#   docker compose up -d      sobe
+#   docker compose down       para (mantém os dados)
+#   docker compose down -v    apaga o banco inteiro
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: dralais-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dralais
+      POSTGRES_PASSWORD: dralais_dev
+      POSTGRES_DB: dralais
+      # pt-BR para ordenação de nome de paciente com acento.
+      LANG: pt_BR.UTF-8
+    ports:
+      - "5432:5432"
+    volumes:
+      - dados-postgres:/var/lib/postgresql/data
+    # O Prisma falha de forma confusa se conectar antes do banco aceitar
+    # conexão. O healthcheck deixa `docker compose up --wait` esperar de verdade.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dralais -d dralais"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Caixa de e-mail de desenvolvimento. Fala SMTP na 1025 e NÃO entrega nada
+  # para fora: tudo o que a aplicação envia para em http://localhost:8025.
+  #
+  # Além de destravar o magic link (sem SMTP, o login do paciente falha no
+  # envio), é assim que se confere o texto da confirmação, do lembrete e do
+  # cancelamento sem mandar e-mail de teste para pessoa real.
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: dralais-mailpit
+    restart: unless-stopped
+    ports:
+      - "1025:1025" # SMTP  — bate com EMAIL_SERVER do .env
+      - "8025:8025" # web UI
+    environment:
+      MP_MAX_MESSAGES: 500
+      # O EMAIL_SERVER do .env traz usuário e senha, então o nodemailer tenta
+      # AUTH. Sem estas duas, o Mailpit recusa a autenticação e o envio falha
+      # exatamente como se não houvesse servidor.
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+
+volumes:
+  dados-postgres:
