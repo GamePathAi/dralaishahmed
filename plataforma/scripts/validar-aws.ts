@@ -295,10 +295,25 @@ async function main() {
       (r.AllowedMethods ?? []).includes("PUT"),
     );
     if (regraPut) {
-      ok(
-        "CORS permite PUT",
-        `origens: ${(regraPut.AllowedOrigins ?? []).join(", ")}`,
-      );
+      const origens = regraPut.AllowedOrigins ?? [];
+      ok("CORS permite PUT", `origens: ${origens.join(", ")}`);
+
+      // A regra existir não basta: a origem de PRODUÇÃO precisa estar na lista.
+      // Foi exatamente este o bug que deixou TODA consulta sem transcrição — o
+      // CORS liberava `www` e `localhost`, mas não `consulta.dralaishahmed...`,
+      // onde a plataforma roda de verdade. O bucket é o mesmo em dev e prod,
+      // então esta checagem vale mesmo rodando o validador localmente.
+      const ORIGEM_PRODUCAO = "https://consulta.dralaishahmed.com.br";
+      if (!origens.includes(ORIGEM_PRODUCAO)) {
+        nao(
+          "CORS NÃO inclui a origem de produção",
+          `falta "${ORIGEM_PRODUCAO}" em AllowedOrigins. Sem ela, o navegador da ` +
+            `médica em produção tem o PUT do áudio bloqueado e a consulta fica ` +
+            `sem transcrição. Adicione no CORS do bucket (S3 → Permissions → CORS).`,
+        );
+      } else {
+        ok("CORS inclui a origem de produção", ORIGEM_PRODUCAO);
+      }
     } else {
       nao(
         "CORS não permite PUT",
