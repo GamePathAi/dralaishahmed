@@ -65,6 +65,28 @@ const schema = z.object({
   // Endereço profissional impresso na receita (exigência do receituário). Opcional
   // para não derrubar o app se ainda não foi preenchido; a receita avisa quando falta.
   ENDERECO_MEDICA: z.string().optional(),
+
+  // --- Prescrição Eletrônica do CFM (Fase 1: SIMULAÇÃO, dormente) ---
+  // Liga o botão "Emitir pelo CFM" na receita. OFF por padrão: o fluxo atual
+  // (assinatura IMPRESSA + imprimir pelo navegador) segue sendo o único.
+  CFM_ATIVO: z
+    .string()
+    .default("false")
+    .transform((v) => v === "true" || v === "1"),
+  // Ambiente. SIMULACAO = mock do CFM, sem credencial. HOMOLOGACAO/PRODUCAO
+  // exigem credenciais do CFM (processo à parte) — ainda não temos.
+  CFM_AMBIENTE: z
+    .enum(["SIMULACAO", "HOMOLOGACAO", "PRODUCAO"])
+    .default("SIMULACAO"),
+  // URL do bundle IIFE da lib do CFM (global `integracaoPrescricaoCfm`). O pacote
+  // npm NÃO está publicado (404 em npm/unpkg, 09/2026), então a lib é carregada
+  // em runtime a partir desta URL (self-host ou CDN do CFM quando disponível).
+  // Sem ela, o botão do CFM avisa que a lib não está configurada.
+  CFM_SCRIPT_URL: z.string().optional(),
+  // Credenciais OAuth do sistema junto ao IAM do CFM (só HOMOLOGACAO/PRODUCAO).
+  CFM_IAM_URL: z.string().optional(),
+  CFM_CLIENT_ID: z.string().optional(),
+  CFM_CLIENT_SECRET: z.string().optional(),
 });
 
 const resultado = schema.safeParse(process.env);
@@ -103,6 +125,24 @@ if (
   throw new Error(
     "PAGAMENTO_PROVEDOR=ASAAS exige ASAAS_API_KEY e ASAAS_WEBHOOK_TOKEN no .env.",
   );
+}
+
+// Fail-safe da Fase 1 do CFM: por enquanto SÓ a SIMULAÇÃO pode ser ligada.
+// HOMOLOGACAO/PRODUCAO só valem com credenciais homologadas junto ao CFM (que
+// ainda não temos) — ligar sem elas geraria receita sem validade legal. Falhar
+// no boot é melhor que descobrir isso na primeira prescrição real.
+if (resultado.data.CFM_ATIVO && resultado.data.CFM_AMBIENTE !== "SIMULACAO") {
+  if (
+    !resultado.data.CFM_IAM_URL ||
+    !resultado.data.CFM_CLIENT_ID ||
+    !resultado.data.CFM_CLIENT_SECRET
+  ) {
+    throw new Error(
+      `CFM_ATIVO=true com CFM_AMBIENTE=${resultado.data.CFM_AMBIENTE} exige ` +
+        "CFM_IAM_URL, CFM_CLIENT_ID e CFM_CLIENT_SECRET (credenciais do CFM). " +
+        "Enquanto não houver homologação, use CFM_AMBIENTE=SIMULACAO.",
+    );
+  }
 }
 
 export const env = resultado.data;

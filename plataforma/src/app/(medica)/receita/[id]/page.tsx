@@ -11,9 +11,17 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { env } from "@/lib/env";
 import type { ItemReceita } from "@/lib/receita-tipos";
 import { EditorReceita } from "@/components/receita/EditorReceita";
 import { EnviarDocumentoPaciente } from "@/components/documentos/EnviarDocumentoPaciente";
+import { BotaoEmitirCfm } from "@/components/receita/BotaoEmitirCfm";
+import {
+  localAtendimentoParaCfm,
+  pacienteParaCfm,
+  medicamentosParaCfm,
+  tipoDocumentoDaReceita,
+} from "@/lib/cfm/mapeamento";
 
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = {
@@ -36,7 +44,20 @@ export default async function PaginaReceita({
   const receita = await prisma.receita.findUnique({
     where: { id },
     include: {
-      paciente: { include: { usuario: { select: { nome: true } } } },
+      paciente: {
+        select: {
+          id: true,
+          usuario: {
+            select: {
+              nome: true,
+              cpf: true,
+              nascimento: true,
+              email: true,
+              telefone: true,
+            },
+          },
+        },
+      },
     },
   });
 
@@ -70,6 +91,31 @@ export default async function PaginaReceita({
 
   const jaAssinada = receita.status === "ASSINADO";
 
+  // Prescrição Eletrônica do CFM (Fase 1, dormente atrás de CFM_ATIVO). Só
+  // aparece com a receita já assinada e o flag ligado — senão nada muda.
+  const u = receita.paciente.usuario;
+  const cfm =
+    env.CFM_ATIVO && jaAssinada
+      ? {
+          receitaId: receita.id,
+          ambiente: env.CFM_AMBIENTE,
+          tipoDocumento: tipoDocumentoDaReceita(receita.temControlado),
+          scriptUrl: env.CFM_SCRIPT_URL,
+          prescricao: {
+            localAtendimento: localAtendimentoParaCfm({ nomeMedica: env.NOME_MEDICA }),
+            paciente: pacienteParaCfm({
+              id: receita.paciente.id,
+              nome: u.nome,
+              cpf: u.cpf,
+              nascimento: u.nascimento,
+              email: u.email,
+              telefone: u.telefone,
+            }),
+            medicamentos: medicamentosParaCfm(itens),
+          },
+        }
+      : null;
+
   return (
     <>
       {jaAssinada && (
@@ -79,6 +125,7 @@ export default async function PaginaReceita({
               Receita assinada. Edite abaixo apenas para <strong>retificar</strong>.
             </p>
             <div className="flex flex-wrap items-center gap-3">
+              {cfm && <BotaoEmitirCfm {...cfm} />}
               <EnviarDocumentoPaciente tipo="receita" id={receita.id} />
               <Link
                 href={`/receita/${receita.id}/imprimir`}

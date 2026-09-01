@@ -413,6 +413,21 @@ botão "Enviar ao paciente" na tela do documento assinado → `POST /api/documen
 `enviarDocumentoDisponivel` (link `AUTH_URL/documentos/...`, rota com sessão, nunca URL pública).
 Coberto pelo roteiro (5c/D). Documentos clínicos: **Fases A–D completas**.
 
+**Integração CFM — Prescrição Eletrônica, Fase 1 (SIMULAÇÃO, DORMENTE atrás de
+`CFM_ATIVO`, não deployada):** groundwork para assinar receita com validade legal
+(ICP-Brasil) pela Prescrição Eletrônica do CFM — cobre branca e controlada. A lib
+oficial do CFM é **frontend** (iframe + postMessage; a médica assina no iframe do
+CFM), e **não está publicada no npm** hoje (é carregada em runtime de `CFM_SCRIPT_URL`).
+Construído, ancorado na API real e testado (`npm run teste:cfm`): flags no `env.ts`
+(`CFM_ATIVO`/`CFM_AMBIENTE`/`CFM_SCRIPT_URL` + credenciais opcionais, fail-safe só liga
+SIMULAÇÃO sem credencial), `src/lib/cfm/*` (tipos, mapeamento Receita→CFM, token OAuth
+cacheado), `GET /api/cfm/token-prescricao`, `POST /api/receita/[id]/emitir-cfm` (grava
+`assinaturaProvedor=CFM`/`assinaturaRef`/`documentoUrl`, idempotente, auditado), e o
+botão `BotaoEmitirCfm` na `/receita/[id]` (só quando `CFM_ATIVO`). **Com `CFM_ATIVO`
+OFF (padrão) nada muda** — o fluxo IMPRESSA+imprimir segue único. Falta para ligar:
+obter o bundle da lib do CFM, liberar a CSP para o domínio do CFM, e as credenciais
+de homologação/produção (processo com o CFM). Atestado via Atesta CFM = próximo passo.
+
 **Consulta presa em "Em andamento" — convergência (bug corrigido):** a consulta
 entra em `EM_ANDAMENTO` quando a médica abre a sala, e a única saída limpa era
 assinar o registro — então sair sem assinar (fechar a aba, "voltar à agenda",

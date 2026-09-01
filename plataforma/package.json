@@ -19,6 +19,7 @@
         "preparar:medica": "tsx --env-file=.env scripts/preparar-teste-medica.ts",
         "vocabulario:aws": "tsx --env-file=.env scripts/vocabulario-aws.ts",
         "validar:aws": "tsx --env-file=.env scripts/validar-aws.ts",
+        "teste:cfm": "tsx scripts/teste-cfm.ts",
         "totp": "tsx --env-file=.env scripts/totp-agora.ts",
         "limpar:teste": "tsx --env-file=.env scripts/limpar-teste.ts",
         "nova:consulta": "tsx --env-file=.env scripts/nova-consulta.ts"
