@@ -7,11 +7,13 @@
  * que vale — quem chamasse a API direto passaria por cima desta.
  */
 
-import { notFound, redirect } from "next/navigation";
+import { redirect } from "next/navigation";
 import type { Metadata } from "next";
+import Link from "next/link";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { EntradaSala } from "@/components/sala/EntradaSala";
+import { BotaoTrocarConta } from "@/components/paciente/BotaoTrocarConta";
 
 export const dynamic = "force-dynamic";
 
@@ -41,10 +43,45 @@ export default async function PaginaSalaPaciente({
     },
   });
 
-  // 404 em vez de 403 para consulta de outra pessoa: um 403 confirmaria que
-  // aquele id existe, o que já é informação a mais.
+  // Consulta que não é desta conta (ou não existe): a MESMA resposta para os
+  // dois casos não confirma a existência do id a estranho. Mas, em vez de um 404
+  // seco, orienta o paciente legítimo que abriu o link já logado em OUTRA conta
+  // (sessão antiga, dois e-mails, aparelho compartilhado) — o caso real que
+  // deixava a pessoa travada sem entender. A NavPaciente some em /sala, então o
+  // botão de trocar de conta vem aqui.
   if (!consulta || consulta.paciente.usuarioId !== sessao.user.id) {
-    notFound();
+    return (
+      <div className="grid min-h-dvh place-items-center bg-slate-950 px-6">
+        <div className="w-full max-w-md text-center">
+          <div className="mx-auto mb-4 grid h-12 w-12 place-items-center rounded-full bg-slate-800 text-xl">
+            🔒
+          </div>
+          <h1 className="font-serif text-xl text-white">
+            Consulta não encontrada nesta conta
+          </h1>
+          <p className="mt-3 text-sm leading-relaxed text-slate-400">
+            Você está conectado como{" "}
+            <strong className="text-slate-200">
+              {sessao.user.email ?? "este e-mail"}
+            </strong>
+            , e não há uma consulta sua neste endereço.
+          </p>
+          <p className="mt-2 text-sm leading-relaxed text-slate-400">
+            Se agendou com outro e-mail, saia e entre com o mesmo que recebeu a
+            mensagem de confirmação.
+          </p>
+          <div className="mt-6 flex flex-col gap-2">
+            <BotaoTrocarConta destino={`/sala/${consultaId}`} />
+            <Link
+              href="/minhas-consultas"
+              className="rounded-xl border border-slate-700 px-6 py-3 text-sm font-semibold text-slate-300 hover:bg-slate-900"
+            >
+              Ver minhas consultas
+            </Link>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   if (consulta.modalidade === "PRESENCIAL") {
